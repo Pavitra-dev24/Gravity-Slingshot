@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: gravity-slingshot-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: CORS_ORIGIN
+        value: "*"   # tighten to your Vercel URL after deploy

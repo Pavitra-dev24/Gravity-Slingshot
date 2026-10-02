@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gravity Slingshot</title>
+<style>
+  :root { --bg:#1a2040; --panel:#232b52; --ink:#efe9d8; --dim:#9aa3c7; --gold:#f2d98d; --mint:#5fd1c0; --rock:#7a86c4; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:20px 16px 40px; display:grid; gap:20px; grid-template-columns:minmax(0,1fr) 260px; }
+  h1 { grid-column:1/-1; margin:0; font:700 clamp(28px,5vw,44px)/1.1 Georgia,'Iowan Old Style',serif; letter-spacing:-.01em; }
+  h1 small { display:block; margin-top:6px; font:400 16px/1.4 system-ui,sans-serif; color:var(--dim); }
+  canvas { width:100%; height:auto; background:radial-gradient(ellipse at 20% 30%,#27305f,#171c38); border-radius:10px; touch-action:none; cursor:crosshair; display:block; }
+  aside { background:var(--panel); border-radius:10px; padding:16px; align-self:start; }
+  h2 { margin:0 0 8px; font:700 18px Georgia,serif; }
+  ol { margin:0; padding-left:22px; } li { display:flex; justify-content:space-between; gap:8px; } li span:first-child { overflow:hidden; text-overflow:ellipsis; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:12px; }
+  button, input { font:inherit; border-radius:8px; border:1px solid #3a4478; background:#2b3464; color:var(--ink); padding:8px 14px; }
+  button { cursor:pointer; } button:hover { background:#36417a; } button:disabled { opacity:.5; cursor:default; }
+  button.primary { background:var(--gold); color:#2a2410; border-color:var(--gold); font-weight:600; }
+  input { width:150px; }
+  :focus-visible { outline:2px solid var(--mint); outline-offset:2px; }
+  #msg { min-height:48px; margin-top:12px; }
+  .dim { color:var(--dim); }
+  @media (max-width:800px) { main { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Gravity Slingshot<small>Pull back, release, and bend your probe around the planets into the green target.</small></h1>
+  <section>
+    <canvas id="c" width="800" height="500" aria-label="Game board"></canvas>
+    <div id="msg" role="status" aria-live="polite">Loading today's level…</div>
+    <div class="bar">
+      <span id="form" hidden>
+        <input id="name" maxlength="16" placeholder="Your name" aria-label="Your name">
+        <button id="submit" class="primary">Submit score</button>
+      </span>
+      <button id="retry">Retry</button>
+      <button id="daily">Today's level</button>
+      <button id="rand">Random level</button>
+    </div>
+  </section>
+  <aside>
+    <h2 id="lbTitle">Leaderboard</h2>
+    <ol id="lb"><li class="dim">No scores yet. Be first.</li></ol>
+    <p class="dim" style="font-size:14px">Scores are verified on the server by replaying your shot, so only real hits count.</p>
+  </aside>
+</main>
+<script src="config.js"></script>
+<script src="sim.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d');
+const API = window.API_BASE;
+let level = null, drag = null, shot = null, anim = null;
+
+async function api(path, opts) {
+  const res = await fetch(API + path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+const say = (t) => ($('msg').textContent = t);
+
+async function load(seed) {
+  say('Loading level… (the free server may take ~30s to wake up)');
+  try {
+    level = await api('/api/level' + (seed !== undefined ? '?seed=' + seed : ''));
+    reset();
+    say(`${level.daily ? "Today's level" : 'Level ' + level.seed}. Par score: ${level.par}. Drag back from the probe to aim.`);
+    $('lbTitle').textContent = level.daily ? "Today's top 10" : `Level ${level.seed} top 10`;
+    refreshBoard();
+  } catch (e) { say('Could not reach the server: ' + e.message); }
+}
+function reset() { shot = null; drag = null; cancelAnimationFrame(anim); $('form').hidden = true; draw(); }
+
+async function refreshBoard() {
+  try {
+    const { scores } = await api('/api/leaderboard?seed=' + level.seed);
+    $('lb').innerHTML = scores.length
+      ? scores.map((s) => `<li><span></span><span>${s.score}</span></li>`).join('')
+      : '<li class="dim">No scores yet. Be first.</li>';
+    [...$('lb').children].forEach((li, i) => scores[i] && (li.firstChild.textContent = scores[i].name));
+  } catch (_) {}
+}
+
+// ---------- Rendering ----------
+function draw(trailUpTo, path) {
+  ctx.clearRect(0, 0, 800, 500);
+  if (!level) return;
+  for (const p of level.planets) {
+    const g = ctx.createRadialGradient(p.x - p.r / 3, p.y - p.r / 3, 2, p.x, p.y, p.r);
+    g.addColorStop(0, '#aab4ea'); g.addColorStop(1, '#4b5594');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+  }
+  const T = level.target;
+  ctx.strokeStyle = '#5fd1c0'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(T.x, T.y, T.r, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.arc(T.x, T.y, 5, 0, 7); ctx.fillStyle = '#5fd1c0'; ctx.fill();
+
+  const preview = drag && !shot ? Sim.simulate(level, ...vec(drag), { record: true, maxSteps: 180 }).path : null;
+  if (preview) {
+    ctx.fillStyle = 'rgba(242,217,141,.6)';
+    for (let i = 0; i < preview.length; i += 4) { ctx.beginPath(); ctx.arc(preview[i][0], preview[i][1], 2, 0, 7); ctx.fill(); }
+    ctx.strokeStyle = 'rgba(239,233,216,.35)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(level.start.x, level.start.y); ctx.lineTo(drag.x, drag.y); ctx.stroke();
+  }
+  if (path) {
+    ctx.strokeStyle = '#f2d98d'; ctx.lineWidth = 2.5; ctx.beginPath();
+    path.slice(0, trailUpTo + 1).forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.stroke();
+    const [hx, hy] = path[Math.min(trailUpTo, path.length - 1)];
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(hx, hy, 5, 0, 7); ctx.fill();
+  } else {
+    ctx.fillStyle = '#f2d98d'; ctx.beginPath(); ctx.arc(level.start.x, level.start.y, 7, 0, 7); ctx.fill();
+  }
+}
+
+// ---------- Input: pull back from the probe, release to fire ----------
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: ((e.clientX - r.left) * 800) / r.width, y: ((e.clientY - r.top) * 500) / r.height };
+}
+// Integer launch vector (units of 0.01 px/step), capped at the server's power limit.
+function vec(p) {
+  let vx = Math.round((level.start.x - p.x) * 2), vy = Math.round((level.start.y - p.y) * 2);
+  const m = Math.hypot(vx, vy);
+  if (m > Sim.MAX_POWER) { vx = Math.round((vx * Sim.MAX_POWER) / m); vy = Math.round((vy * Sim.MAX_POWER) / m); }
+  return [vx, vy];
+}
+cv.addEventListener('pointerdown', (e) => { if (!level || shot) return; cv.setPointerCapture(e.pointerId); drag = pos(e); draw(); });
+cv.addEventListener('pointermove', (e) => { if (drag && !shot) { drag = pos(e); draw(); } });
+cv.addEventListener('pointerup', () => {
+  if (!drag || shot) return;
+  const [vx, vy] = vec(drag); drag = null;
+  if (Math.hypot(vx, vy) < 100) { draw(); return say('Pull back further to build power.'); }
+  fire(vx, vy);
+});
+
+function fire(vx, vy) {
+  const r = Sim.simulate(level, vx, vy, { record: true });
+  shot = { vx, vy, ...r, score: Sim.scoreOf(r.steps, vx, vy) };
+  let i = 0;
+  const tick = () => {
+    i = Math.min(i + 3, r.path.length - 1);
+    draw(i, r.path);
+    if (i < r.path.length - 1) return (anim = requestAnimationFrame(tick));
+    if (r.result === 'hit') {
+      say(`Hit in ${r.steps} steps. Score ${shot.score} (par ${level.par}). Enter a name to post it.`);
+      $('form').hidden = false;
+    } else say({ crash: 'Crashed into a planet.', lost: 'Drifted into deep space.', timeout: 'Ran out of fuel.' }[r.result] + ' Hit Retry.');
+  };
+  tick();
+}
+
+// ---------- Buttons ----------
+$('retry').onclick = reset;
+$('daily').onclick = () => load();
+$('rand').onclick = () => load(Math.floor(Math.random() * 1e6));
+$('submit').onclick = async () => {
+  const name = $('name').value.trim();
+  if (!name) return say('Enter a name first.');
+  $('submit').disabled = true;
+  try {
+    const r = await api('/api/score', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seed: level.seed, name, vx: shot.vx, vy: shot.vy }) });
+    say(`Verified. Score ${r.score}, rank ${r.rank || 'outside top 10'}.`);
+    $('form').hidden = true; refreshBoard();
+  } catch (e) { say(e.message); }
+  $('submit').disabled = false;
+};
+
+load();
+</script>
+</body>
+</html>
